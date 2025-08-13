@@ -1,0 +1,49 @@
+name: Images (Promote Channel)
+
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: "Source channel (dev|stage)"
+        required: true
+        default: "dev"
+      to:
+        description: "Target channel (stage|prod)"
+        required: true
+        default: "stage"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ github.event.inputs.to }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+
+      - run: npm ci
+
+      # Either cloud can be promoted independently; you can also do both.
+      - name: AWS OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/<GHA_OIDC_ROLE_${{ github.event.inputs.to }}>
+          aws-region: eu-west-1
+
+      - name: GCP OIDC
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/<POOL>/providers/<PROVIDER>
+          service_account: gha-magi-${{ github.event.inputs.to }}@<GCP_PROJECT_ID>.iam.gserviceaccount.com
+
+      - name: Promote AWS
+        run: npx magi image promote magi/web-base --cloud aws --from ${{ inputs.from }} --to ${{ inputs.to }}
+
+      - name: Promote GCP
+        run: npx magi image promote magi/web-base --cloud gcp --from ${{ inputs.from }} --to ${{ inputs.to }}

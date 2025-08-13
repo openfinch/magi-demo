@@ -1,0 +1,101 @@
+name: Images (Build & Publish)
+
+on:
+  push:
+    branches: [ "**" ]
+    paths:
+      - "images/**"
+      - ".github/workflows/images.yml"
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Environment channel to publish (dev|stage|prod)"
+        required: true
+        default: "dev"
+
+env:
+  NODE_VERSION: "20"
+  PACKER_VERSION: "1.11.2"
+  MAGI_ENV: ${{ github.event.inputs.env || (github.ref == 'refs/heads/main' && 'dev') || 'dev' }}
+
+permissions:
+  id-token: write   # OIDC for cloud auth
+  contents: read
+  actions: read
+
+jobs:
+  bake:
+    name: Bake images for ${{ env.MAGI_ENV }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        cloud: [ aws, gcp ]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with: { node-version: ${{ env.NODE_VERSION }} }
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            **/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@v3
+        with: { version: ${{ env.PACKER_VERSION }} }
+
+      # --- Cloud auth via OIDC ---
+
+      - name: Configure AWS (OIDC)
+        if: matrix.cloud == 'aws'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/<GHA_OIDC_ROLE>
+          aws-region: eu-west-1
+          role-session-name: magi-images-${{ github.run_id }}
+
+      - name: Configure GCP (OIDC)
+        if: matrix.cloud == 'gcp'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/<POOL>/providers/<PROVIDER>
+          service_account: gha-magi@<GCP_PROJECT_ID>.iam.gserviceaccount.com
+
+      - name: Build image
+        run: |
+          npx magi image build \
+            --cloud ${{ matrix.cloud }} \
+            --env ${{ env.MAGI_ENV }} \
+            images/web-base.ts
+
+      - name: Publish to channel
+        run: |
+          npx magi image publish \
+            --cloud ${{ matrix.cloud }} \
+            --channel ${{ env.MAGI_ENV }} \
+            images/web-base.ts
+
+      - name: Export image map
+        run: |
+          mkdir -p artifacts
+          npx magi image export-map \
+            --cloud ${{ matrix.cloud }} \
+            --env ${{ env.MAGI_ENV }} \
+            --out artifacts/image-map-${{ matrix.cloud }}.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-map-${{ matrix.cloud }}
+          path: artifacts/image-map-${{ matrix.cloud }}.json
+          retention-days: 14
